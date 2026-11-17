@@ -1,9 +1,22 @@
-# FoodLink (simple version)
- 
-Plain HTML, CSS and JavaScript. No React, no backend, no install, no animations.
-Open `login.html` (or `index.html`) in a browser.
+# FoodLink (Node + Express + MongoDB)
 
-Login is kept in sessionStorage. Food data is kept in localStorage.
+Same FoodLink as before, but the data now lives in MongoDB and the pages talk to an Express server.
+
+## How to run
+
+1. Install Node.js and MongoDB (and make sure MongoDB is running on the default port 27017).
+2. Open a terminal in this folder and run:
+
+```
+npm install
+npm start
+```
+
+3. Open http://localhost:3000 in the browser.
+
+The first time it runs, the demo accounts and 3 sample food listings are added to the `foodlink` database automatically.
+
+## Demo accounts
 
 | Account | Username | Password | Can see |
 |---|---|---|---|
@@ -16,20 +29,17 @@ abt.html and cntct.html are open to everyone.
 
 Flow: donor adds food (pending) -> inspector tastes and approves -> NGO sees it and claims it -> donor confirms pickup with the 4-digit code. Rejected or pending food is never shown to NGOs.
 
+## Files
+
 | File | What it does |
 |---|---|
-| login.html | Login, sends you to your own page |
-| home.html | (NGO) food cards, soonest expiry first, Claim button |
-| reg.html | (NGO) claim form, creates the 4-digit pickup code |
-| myreg.html | (NGO) your claims with pickup code |
-| donor.html | (Donor) add food, see inspection result, confirm pickup with the code, remove listings |
-| inspector.html | (Inspector) approve or reject new food after tasting it at the location |
-| admin.html | (Admin) stats, remove any listing, send a listing back for re-inspection |
-| abt.html / cntct.html | Static info pages |
-| app.js | Login helpers, header, sample data |
-| style.css | Shared styles |
+| server.js | Express server, login (sessions) and all the API routes |
+| models/User.js | User collection (username, password, role, name) |
+| models/Food.js | Food collection (listing, inspection, claim details) |
+| public/ | All the pages, style.css and app.js (they call the API with fetch) |
 
-Accounts are in the `USERS` list at the top of app.js.
-To reset the demo data: browser console, `localStorage.clear()`.
+## Reset the demo data
+
+In the mongo shell: `use foodlink` then `db.dropDatabase()`. Restart the server to get the sample data back.
 
 We are planning to use official college gmail ids for sending email notifications to the ngo

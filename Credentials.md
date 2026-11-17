@@ -8,9 +8,8 @@ Password:ngo123
 
 Admin:
 Username:admin
-Password:donor123
+Password:admin123
 
 Inspection Officer:
 Username:inspector
 Password:inspect123
-

@@ -32,52 +32,44 @@
 
     <script src="app.js"></script>
     <script>
-        requireRole("ngo");
-        showNav();
-
-        // fill the name from the login
-        let me = currentUser();
-        if(me != null){ document.getElementById("un").value = me.name; }
-
         let fid = sessionStorage.getItem("fid");
-        let food = loadFood();
-        let item = food.find(function(x){ return x.id == fid; });
+        start();
 
-        if(item == null || item.status != "available" || item.approval != "approved"){
-            window.location.href = "home.html";
-        }else{
-            document.getElementById("what").innerHTML =
-                "You are claiming: <b>"+esc(item.name)+"</b> ("+item.servings+" servings)";
+        async function start(){
+            let me = await requireRole("ngo");
+            if(me == null){ return; }
+            showNav();
+
+            // fill the name from the login
+            document.getElementById("un").value = me.name;
+
+            let food = await api("/api/food/approved");
+            let item = food.find(function(x){ return x._id == fid; });
+
+            if(item == null || item.status != "available"){
+                window.location.href = "home.html";
+            }else{
+                document.getElementById("what").innerHTML =
+                    "You are claiming: <b>"+esc(item.name)+"</b> ("+item.servings+" servings)";
+            }
         }
 
-        function submitClaim(e){
+        async function submitClaim(e){
             e.preventDefault();
 
-            // read again, in case someone else claimed it meanwhile
-            let list = loadFood();
-            let f = list.find(function(x){ return x.id == fid; });
-            if(f == null || f.status != "available" || f.approval != "approved"){
+            // the server checks again, in case someone else claimed it meanwhile
+            let data = await api("/api/food/"+fid+"/claim", "POST", {
+                name:  document.getElementById("un").value,
+                phone: document.getElementById("uph").value,
+                mail:  document.getElementById("um").value,
+                kind:  document.getElementById("ut").value
+            });
+
+            if(!data.ok){
                 alert("Sorry, this food is no longer available.");
                 window.location.href = "home.html";
                 return false;
             }
-
-            f.status = "claimed";
-            f.code = String(Math.floor(1000 + Math.random()*9000));   // 4-digit pickup code
-            f.claimedAt = new Date().toISOString();
-            f.claimer = {
-                name:  document.getElementById("un").value,
-                phone: document.getElementById("uph").value,
-                mail:  document.getElementById("um").value,
-                type:  document.getElementById("ut").value
-            };
-            saveFood(list);
-
-            // remember which claims belong to this browser
-            let mine = JSON.parse(localStorage.getItem("MYCLAIMS") || "[]");
-            mine.push(f.id);
-            localStorage.setItem("MYCLAIMS", JSON.stringify(mine));
-
             window.location.href = "myreg.html";
             return false;
         }

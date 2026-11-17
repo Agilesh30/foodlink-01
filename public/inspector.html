@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Inspections</title>
+    <link rel="icon" type="image/png" href="favicon.png">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header id="hdr"></header>
+
+    <h2>WAITING FOR INSPECTION</h2>
+    <p class="center">Go to the pickup location, taste the food, then approve or reject it.</p>
+    <div class="container" id="pending"></div>
+
+    <h2>ALREADY INSPECTED</h2>
+    <table>
+        <thead>
+            <tr><th>Food</th><th>Donor</th><th>Address</th><th>Result</th><th>Note</th><th>When</th></tr>
+        </thead>
+        <tbody id="done"></tbody>
+    </table>
+    <br><br>
+
+    <script src="app.js"></script>
+    <script>
+        start();
+
+        async function start(){
+            let me = await requireRole("inspector");    // only the inspector can see this page
+            if(me == null){ return; }
+            showNav();
+            show();
+        }
+
+        async function show(){
+            let data = await api("/api/inspections");
+            let html = "";
+            let rows = "";
+
+            for(let i=0;i<data.pending.length;i++){
+                let f = data.pending[i];
+                html += '<div class="card">'+
+                    '<h2>'+esc(f.name)+'</h2>'+
+                    '<pre>'+
+                    '<b>SERVINGS :</b> '+f.servings+'\n'+
+                    '<b>TYPE     :</b> '+(f.veg?"Veg":"Non-veg")+' / '+esc(f.nature)+'\n'+
+                    '<b>GO TO    :</b> '+esc(f.address)+'\n'+
+                    '<b>DONOR    :</b> '+esc(f.donor)+' ('+esc(f.phone)+')\n'+
+                    '<b>EXPIRES  :</b> '+fmt(f.expires)+
+                    '</pre>'+
+                    '<input id="n'+f._id+'" type="text" placeholder="Note (needed to reject)">'+
+                    '<br><br>'+
+                    '<button onclick="decide(\''+f._id+'\',true)">Tasted - Approve</button> '+
+                    '<button class="red" onclick="decide(\''+f._id+'\',false)">Reject</button>'+
+                    '</div>';
+            }
+
+            for(let i=0;i<data.done.length;i++){
+                let f = data.done[i];
+                rows += '<tr>'+
+                    '<td>'+esc(f.name)+'</td>'+
+                    '<td>'+esc(f.donor)+'</td>'+
+                    '<td>'+esc(f.address)+'</td>'+
+                    '<td><span class="badge '+f.approval+'">'+f.approval+'</span></td>'+
+                    '<td>'+(f.inspectNote ? esc(f.inspectNote) : "-")+'</td>'+
+                    '<td>'+(f.inspectedAt ? fmt(f.inspectedAt) : "-")+'</td>'+
+                    '</tr>';
+            }
+
+            if(html == ""){ html = '<p class="center full">Nothing waiting.</p>'; }
+            document.getElementById("pending").innerHTML = html;
+            document.getElementById("done").innerHTML = rows;
+        }
+
+        async function decide(id, ok){
+            let note = document.getElementById("n"+id).value.trim();
+            if(!ok && note == ""){
+                alert("Please write a reason to reject.");
+                return;
+            }
+            await api("/api/food/"+id+"/inspect", "POST", { ok:ok, note:note });
+            show();
+        }
+    </script>
+</body>
+</html>

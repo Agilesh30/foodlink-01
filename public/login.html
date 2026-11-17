@@ -25,23 +25,28 @@
     <script src="app.js"></script>
     <script>
         showNav();
-        let me = currentUser();
-        if(me != null){
-            window.location.href = homeFor(me.role);
+        checkLogin();
+
+        // already logged in? go to your own page
+        async function checkLogin(){
+            let me = await currentUser();
+            if(me != null){
+                window.location.href = homeFor(me.role);
+            }
         }
 
-        function doLogin(e){
+        async function doLogin(e){
             e.preventDefault();
             let u = document.getElementById("lu").value;
             let p = document.getElementById("lp").value;
-            let found = USERS.find(function(x){ return x.user == u && x.pass == p; });
 
-            if(found == null){
+            let data = await api("/api/login", "POST", { username:u, password:p });
+
+            if(!data.ok){
                 document.getElementById("err").innerHTML = "Wrong username or password";
                 return false;
             }
-            sessionStorage.setItem("USER", JSON.stringify({ name:found.name, role:found.role }));
-            window.location.href = homeFor(found.role);
+            window.location.href = homeFor(data.role);
             return false;
         }
     </script>

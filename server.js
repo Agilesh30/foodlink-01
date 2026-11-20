@@ -236,6 +236,8 @@ function formatFood(f) {
         code: f.code,
         assignedInspector: f.assigned_inspector,
         assigned_inspector: f.assigned_inspector,
+        passedBy: f.passed_by,
+        passed_by: f.passed_by,
         claimedAt: f.claimed_at,
         claimed_at: f.claimed_at,
         claimedBy: f.claimed_by,
@@ -746,10 +748,24 @@ app.get("/api/inspections", needRole("inspector"), async function (req, res) {
     res.json({ pending, done });
 });
 
-// Inspector passes task to the other inspector
+// Inspector passes task to the other inspector (allowed only once per task)
 app.post("/api/food/:id/pass", needRole("inspector"), async function (req, res) {
     const supabase = getSupabase();
     const currentEmail = req.session.user.email || req.session.user.username;
+
+    // Only the current assignee can pass, and only once
+    const { data: current } = await supabase
+        .from("foods")
+        .select("assigned_inspector, passed_by")
+        .eq("id", req.params.id)
+        .maybeSingle();
+
+    if (!current || current.assigned_inspector !== currentEmail) {
+        return res.status(403).json({ ok: false, error: "This task is not assigned to you." });
+    }
+    if (current.passed_by) {
+        return res.status(400).json({ ok: false, error: "This task was already passed to you. You must accept or reject it." });
+    }
 
     // Find the other inspector
     const { data: otherInspectors, error: insErr } = await supabase
@@ -764,12 +780,16 @@ app.post("/api/food/:id/pass", needRole("inspector"), async function (req, res) 
 
     const targetInspector = otherInspectors[0];
 
-    // Reassign food to the other inspector
+    // Reassign food to the other inspector and record who passed it
     const { data: updatedFood, error: updateErr } = await supabase
         .from("foods")
-        .update({ assigned_inspector: targetInspector.email })
+        .update({
+            assigned_inspector: targetInspector.email,
+            passed_by: req.session.user.name
+        })
         .eq("id", req.params.id)
         .eq("assigned_inspector", currentEmail)
+        .is("passed_by", null)
         .select()
         .single();
 
@@ -924,10 +944,10 @@ app.post("/api/admin/food/:id/assign", needRole("admin"), async function (req, r
         return res.status(404).json({ ok: false, error: "Inspector not found." });
     }
 
-    // Assign inspector in database
+    // Assign inspector in database (resets the "passed" flag so this inspector can pass it once)
     const { data: food, error } = await supabase
         .from("foods")
-        .update({ assigned_inspector: inspector.email })
+        .update({ assigned_inspector: inspector.email, passed_by: null })
         .eq("id", req.params.id)
         .select()
         .single();

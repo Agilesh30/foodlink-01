@@ -3,8 +3,14 @@ const { Resend } = require("resend");
 
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
 const fromEmail = process.env.FROM_EMAIL || "FoodLink <notifications@apexinterview.in>";
-// APP_URL is optional — omit it and links become relative paths that work on any host
-const appUrl = (process.env.APP_URL || "").replace(/\/$/, "");
+
+const DEFAULT_APP_URL = "https://foodlink-version-03.vercel.app";
+
+const appUrl = (
+    process.env.APP_URL ||
+    (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : "") ||
+    DEFAULT_APP_URL
+).replace(/\/$/, "");
 
 // ─── Core Mailer ───────────────────────────────────────────────────────────────
 async function sendMail({ to, subject, html }) {

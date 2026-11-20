@@ -176,10 +176,11 @@ function pill(text, bg) {
 // NOTIFICATION 1 — Admin: New donation request submitted
 // ═══════════════════════════════════════════════════════════════════════════════
 async function notifyAdminNewDonation(food, adminEmails) {
-    // Never silently skip: fall back to ADMIN_EMAIL env, then to the default admin address
-    let recipients = Array.isArray(adminEmails) ? adminEmails.filter(Boolean) : [adminEmails].filter(Boolean);
-    if (recipients.length === 0 && process.env.ADMIN_EMAIL) recipients = process.env.ADMIN_EMAIL.split(",").map(e => e.trim()).filter(Boolean);
-    if (recipients.length === 0) recipients = [DEFAULT_ADMIN_EMAIL];
+    // Always include the hardcoded admin address, plus anything passed in or set in ADMIN_EMAIL
+    const passed = Array.isArray(adminEmails) ? adminEmails : [adminEmails];
+    const fromEnv = process.env.ADMIN_EMAIL ? process.env.ADMIN_EMAIL.split(",") : [];
+    const recipients = [...new Set([DEFAULT_ADMIN_EMAIL, ...passed, ...fromEnv].map(e => (e || "").trim()).filter(Boolean))];
+    console.log("[FoodLink Email] Admin notification triggered for:", food && food.name, "->", recipients.join(", "));
 
     const expires = new Date(food.expires).toLocaleString("en-IN", {
         timeZone: "Asia/Kolkata", day: "2-digit", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit"

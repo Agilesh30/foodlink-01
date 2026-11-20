@@ -3,23 +3,123 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Login</title>
+    <title>FoodLink - Login & Register</title>
     <link rel="icon" type="image/png" href="favicon.png">
     <link rel="stylesheet" href="style.css">
+    <style>
+        .tabs {
+            display: flex;
+            border-bottom: 2px solid #e2e8f0;
+            margin-bottom: 20px;
+        }
+        .tab-btn {
+            flex: 1;
+            background: none;
+            color: #64748b;
+            border: none;
+            padding: 12px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            border-bottom: 3px solid transparent;
+            transition: all 0.2s;
+        }
+        .tab-btn.active {
+            color: #14532d;
+            border-bottom-color: #16a34a;
+            background-color: #f0fdf4;
+            border-radius: 8px 8px 0 0;
+        }
+        .tab-btn:hover:not(.active) {
+            color: #334155;
+            background-color: #f8fafc;
+        }
+        .success {
+            color: #15803d;
+            text-align: center;
+            min-height: 22px;
+            font-weight: 500;
+        }
+    </style>
 </head>
 <body>
     <header id="hdr"></header>
 
-    <div class="box" style="width:400px">
-        <h2>LOGIN</h2>
-        <form onsubmit="return doLogin(event)">
-            <div class="grid2">
-                <input class="full" id="lu" type="text" placeholder="Username" required>
-                <input class="full" id="lp" type="password" placeholder="Password" required>
-            </div>
-            <div class="error" id="err"></div>
-            <div class="center"><button type="submit">Login</button></div>
-        </form>
+    <div class="box" style="width:480px">
+        <div class="tabs">
+            <button type="button" class="tab-btn active" id="tab-login" onclick="setMode('login')">Log In</button>
+            <button type="button" class="tab-btn" id="tab-register" onclick="setMode('register')">Register / Sign Up</button>
+        </div>
+
+        <!-- LOGIN FORM -->
+        <div id="login-section">
+            <h2>WELCOME BACK</h2>
+            <form onsubmit="return doLogin(event)">
+                <div class="grid2">
+                    <input class="full" id="le" type="email" placeholder="Email Address" required autocomplete="email">
+                    <input class="full" id="lp" type="password" placeholder="Password" required autocomplete="current-password">
+                </div>
+                <div class="error" id="err-login"></div>
+                <div class="center" style="margin-top:12px">
+                    <button type="submit">Log In</button>
+                </div>
+                <p class="center" style="margin-top:12px; font-size:13px; color:#64748b;">
+                    <a href="#" onclick="setMode('forgot')" style="color:#64748b;">Forgot password?</a>
+                </p>
+                <p class="center" style="margin-top:4px; font-size:14px; color:#64748b;">
+                    Need a new account? <a href="#" onclick="setMode('register')" style="color:#16a34a; font-weight:bold;">Sign up here</a>
+                </p>
+            </form>
+        </div>
+
+        <!-- FORGOT PASSWORD FORM -->
+        <div id="forgot-section" style="display:none;">
+            <h2>FORGOT PASSWORD</h2>
+            <p style="font-size:14px; color:#64748b; text-align:center; margin-bottom:16px;">Enter your email and we'll send you a reset link.</p>
+            <form onsubmit="return doForgot(event)">
+                <input class="full" id="fe-forgot" type="email" placeholder="Your Email Address" required autocomplete="email">
+                <div class="error" id="err-forgot"></div>
+                <div class="success" id="suc-forgot"></div>
+                <div class="center" style="margin-top:14px;">
+                    <button type="submit" id="forgot-btn">Send Reset Link</button>
+                </div>
+                <p class="center" style="margin-top:14px; font-size:14px; color:#64748b;">
+                    <a href="#" onclick="setMode('login')" style="color:#16a34a; font-weight:bold;">Back to Login</a>
+                </p>
+            </form>
+        </div>
+
+        <!-- REGISTER FORM -->
+        <div id="register-section" style="display:none;">
+            <h2>CREATE ACCOUNT</h2>
+            <form onsubmit="return doRegister(event)">
+                <div class="grid2">
+                    <input class="full" id="rn" type="text" placeholder="Full Name or Organization Name" required>
+                    <input class="full" id="re" type="email" placeholder="Email Address (for notifications & login)" required autocomplete="email">
+                    
+                    <select class="full" id="rr" required>
+                        <option value="" disabled selected>Select Your Role</option>
+                        <option value="donor">Food Donor (Restaurant, Mess, Event, Caterer)</option>
+                        <option value="ngo">NGO / Relief Organization / Food Bank</option>
+                    </select>
+
+                    <input class="full" id="rp" type="tel" placeholder="Phone Number (e.g. 9876543210)" required pattern="[6-9][0-9]{9}" title="Enter 10-digit mobile number starting with 6-9">
+                    
+                    <input id="rpw" type="password" placeholder="Password (min 6 chars)" required minlength="6" autocomplete="new-password">
+                    <input id="rpc" type="password" placeholder="Confirm Password" required minlength="6" autocomplete="new-password">
+                </div>
+
+                <div class="error" id="err-register"></div>
+                <div class="success" id="suc-register"></div>
+
+                <div class="center" style="margin-top:12px">
+                    <button type="submit">Create Account</button>
+                </div>
+                <p class="center" style="margin-top:16px; font-size:14px; color:#64748b;">
+                    Already have an account? <a href="#" onclick="setMode('login')" style="color:#16a34a; font-weight:bold;">Log in</a>
+                </p>
+            </form>
+        </div>
     </div>
 
     <script src="app.js"></script>
@@ -27,7 +127,54 @@
         showNav();
         checkLogin();
 
-        // already logged in? go to your own page
+        function setMode(mode){
+            document.getElementById("err-login").innerHTML = "";
+            document.getElementById("err-register").innerHTML = "";
+            document.getElementById("suc-register").innerHTML = "";
+            document.getElementById("err-forgot").innerHTML = "";
+            document.getElementById("suc-forgot").innerHTML = "";
+
+            var sections = ["login-section","register-section","forgot-section"];
+            sections.forEach(function(id){ document.getElementById(id).style.display = "none"; });
+
+            if(mode === "login"){
+                document.getElementById("login-section").style.display = "block";
+                document.getElementById("tab-login").classList.add("active");
+                document.getElementById("tab-register").classList.remove("active");
+            } else if(mode === "register"){
+                document.getElementById("register-section").style.display = "block";
+                document.getElementById("tab-login").classList.remove("active");
+                document.getElementById("tab-register").classList.add("active");
+            } else {
+                // forgot
+                document.getElementById("forgot-section").style.display = "block";
+                document.getElementById("tab-login").classList.remove("active");
+                document.getElementById("tab-register").classList.remove("active");
+            }
+        }
+
+        async function doForgot(e){
+            e.preventDefault();
+            document.getElementById("err-forgot").innerHTML = "";
+            document.getElementById("suc-forgot").innerHTML = "";
+            var btn = document.getElementById("forgot-btn");
+            btn.disabled = true;
+            btn.textContent = "Sending...";
+
+            var email = document.getElementById("fe-forgot").value.trim().toLowerCase();
+            var data = await api("/api/forgot-password", "POST", { email: email });
+
+            btn.disabled = false;
+            btn.textContent = "Send Reset Link";
+
+            if(!data.ok){
+                document.getElementById("err-forgot").innerHTML = esc(data.error || "Something went wrong.");
+            } else {
+                document.getElementById("suc-forgot").innerHTML = "If that email is registered, a reset link has been sent. Check your inbox.";
+            }
+            return false;
+        }
+
         async function checkLogin(){
             let me = await currentUser();
             if(me != null){
@@ -37,16 +184,59 @@
 
         async function doLogin(e){
             e.preventDefault();
-            let u = document.getElementById("lu").value;
-            let p = document.getElementById("lp").value;
+            document.getElementById("err-login").innerHTML = "";
+            let email = document.getElementById("le").value.trim();
+            let password = document.getElementById("lp").value;
 
-            let data = await api("/api/login", "POST", { username:u, password:p });
+            let data = await api("/api/login", "POST", { email: email, password: password });
 
             if(!data.ok){
-                document.getElementById("err").innerHTML = "Wrong username or password";
+                document.getElementById("err-login").innerHTML = esc(data.error || "Wrong email or password");
                 return false;
             }
             window.location.href = homeFor(data.role);
+            return false;
+        }
+
+        async function doRegister(e){
+            e.preventDefault();
+            document.getElementById("err-register").innerHTML = "";
+            document.getElementById("suc-register").innerHTML = "";
+
+            let name = document.getElementById("rn").value.trim();
+            let email = document.getElementById("re").value.trim().toLowerCase();
+            let role = document.getElementById("rr").value;
+            let phone = document.getElementById("rp").value.trim();
+            let password = document.getElementById("rpw").value;
+            let confirmPassword = document.getElementById("rpc").value;
+
+            if(!role){
+                document.getElementById("err-register").innerHTML = "Please select a role.";
+                return false;
+            }
+
+            if(password !== confirmPassword){
+                document.getElementById("err-register").innerHTML = "Passwords do not match.";
+                return false;
+            }
+
+            let data = await api("/api/register", "POST", {
+                name: name,
+                email: email,
+                role: role,
+                phone: phone,
+                password: password
+            });
+
+            if(!data.ok){
+                document.getElementById("err-register").innerHTML = esc(data.error || "Could not register account");
+                return false;
+            }
+
+            document.getElementById("suc-register").innerHTML = "Account created! Redirecting...";
+            setTimeout(function(){
+                window.location.href = homeFor(data.role);
+            }, 800);
             return false;
         }
     </script>

@@ -6,16 +6,38 @@
     <title>Donate Food</title>
     <link rel="icon" type="image/png" href="favicon.png">
     <link rel="stylesheet" href="style.css">
+    <style>
+        .expiry-quick { display:flex; flex-wrap:wrap; gap:8px; margin:10px 0 6px; }
+        .expiry-quick button {
+            flex:1; min-width:90px; padding:8px 10px; font-size:13px; font-weight:600;
+            border:2px solid #d1fae5; background:#f0fdf4; color:#15803d;
+            border-radius:8px; cursor:pointer; transition:all 0.15s;
+        }
+        .expiry-quick button:hover, .expiry-quick button.sel {
+            background:#16a34a; color:#fff; border-color:#16a34a;
+        }
+        .expiry-custom { margin-top:6px; }
+        .expiry-label {
+            font-size:13px; color:#64748b; margin-bottom:4px; display:block;
+        }
+        #expiry-display {
+            font-size:13px; font-weight:600; color:#15803d;
+            margin-left:8px; vertical-align:middle;
+        }
+    </style>
 </head>
 <body>
     <header id="hdr"></header>
 
     <div class="box">
         <h2>ADD SURPLUS FOOD</h2>
+        <p class="center" style="color:#475569; font-size:14px; margin-top:-5px; margin-bottom:15px;">
+            Donor Account: <b id="donor-profile-info" style="color:#14532d;">Loading...</b>
+        </p>
         <form onsubmit="return addFood(event)">
             <div class="grid2">
-                <input id="fn" type="text" placeholder="Food name" required>
-                <input id="fs" type="number" min="1" placeholder="Servings" required>
+                <input id="fn" type="text" placeholder="Food name (e.g. Veg Biryani)" required>
+                <input id="fs" type="number" min="1" placeholder="Servings (Number of meals)" required>
                 <select id="fv" required>
                     <option>Veg</option>
                     <option>Non-veg</option>
@@ -24,12 +46,28 @@
                     <option>Freshly cooked</option>
                     <option>Packaged</option>
                 </select>
-                <input class="full" id="fe" type="datetime-local" required title="Expiry time">
-                <input class="full" id="fa" type="text" placeholder="Pickup address / landmark" required>
-                <input id="fd" type="text" placeholder="Donor name" required>
-                <input id="fp" type="tel" placeholder="Phone number" required pattern="[6-9][0-9]{9}" title="enter valid phone number">
             </div>
-            <div class="center"><button type="submit">Add Food</button></div>
+
+            <!-- Expiry Quick Pick -->
+            <span class="expiry-label">⏱ Food valid for how long?<span id="expiry-display"></span></span>
+            <div class="expiry-quick" id="quick-btns">
+                <button type="button" onclick="setExpiry(1,'1 hour')">1 Hour</button>
+                <button type="button" onclick="setExpiry(2,'2 Hours')">2 Hours</button>
+                <button type="button" onclick="setExpiry(4,'4 Hours')">4 Hours</button>
+                <button type="button" onclick="setExpiry(6,'6 Hours')">6 Hours</button>
+                <button type="button" onclick="setExpiry(12,'12 Hours')">12 Hours</button>
+                <button type="button" onclick="setExpiry(24,'24 Hours')">24 Hours</button>
+                <button type="button" onclick="toggleCustom()">📅 Custom</button>
+            </div>
+            <div class="expiry-custom" id="custom-wrap" style="display:none;">
+                <input class="full" id="fe-custom" type="datetime-local" title="Pick exact expiry time">
+            </div>
+            <!-- Hidden actual expiry value submitted -->
+            <input type="hidden" id="fe">
+
+            <input class="full" id="fa" type="text" placeholder="Pickup address / landmark" required style="margin-top:10px;">
+
+            <div class="center" style="margin-top:14px;"><button type="submit">Add Food</button></div>
         </form>
     </div>
 
@@ -51,21 +89,57 @@
     <script src="app.js"></script>
     <script>
         let me = null;
+        let selectedExpiry = null; // stores the chosen ISO expiry date
         start();
 
         async function start(){
             me = await requireRole("donor");
             if(me == null){ return; }
             showNav();
-            document.getElementById("fd").value = me.name;
+            let phoneStr = me.phone ? " | Phone: " + me.phone : "";
+            document.getElementById("donor-profile-info").textContent = me.name + " (" + me.email + phoneStr + ")";
+            // Set custom picker min to now
+            let now = new Date();
+            now.setSeconds(0, 0);
+            document.getElementById("fe-custom").min = now.toISOString().slice(0, 16);
+            // Listen for custom date change
+            document.getElementById("fe-custom").addEventListener("change", function(){
+                let d = new Date(this.value);
+                if(d > new Date()){
+                    selectedExpiry = d.toISOString();
+                    document.getElementById("fe").value = selectedExpiry;
+                    document.getElementById("expiry-display").textContent = " — expires " + d.toLocaleString("en-IN", {dateStyle:"medium", timeStyle:"short"});
+                    // Clear quick button selection
+                    document.querySelectorAll("#quick-btns button").forEach(b => b.classList.remove("sel"));
+                }
+            });
             showRows();
+        }
+
+        function setExpiry(hours, label){
+            let d = new Date(Date.now() + hours * 3600 * 1000);
+            selectedExpiry = d.toISOString();
+            document.getElementById("fe").value = selectedExpiry;
+            document.getElementById("expiry-display").textContent = " — expires " + d.toLocaleString("en-IN", {dateStyle:"medium", timeStyle:"short"});
+            // Highlight selected button
+            document.querySelectorAll("#quick-btns button").forEach(b => b.classList.remove("sel"));
+            event.target.classList.add("sel");
+            // Hide custom picker
+            document.getElementById("custom-wrap").style.display = "none";
+        }
+
+        function toggleCustom(){
+            let wrap = document.getElementById("custom-wrap");
+            let isVisible = wrap.style.display !== "none";
+            wrap.style.display = isVisible ? "none" : "block";
+            document.querySelectorAll("#quick-btns button").forEach(b => b.classList.remove("sel"));
+            if(!isVisible) event.target.classList.add("sel");
         }
 
         async function addFood(e){
             e.preventDefault();
-            let expiry = new Date(document.getElementById("fe").value);
-            if(expiry.getTime() <= Date.now()){
-                alert("Expiry time must be in the future.");
+            if(!selectedExpiry || new Date(selectedExpiry) <= new Date()){
+                alert("Please select a valid expiry time.");
                 return false;
             }
 
@@ -74,18 +148,20 @@
                 servings: Number(document.getElementById("fs").value),
                 veg: document.getElementById("fv").value == "Veg",
                 nature: document.getElementById("fnat").value,
-                expires: expiry.toISOString(),
-                address: document.getElementById("fa").value,
-                donor: document.getElementById("fd").value,
-                phone: document.getElementById("fp").value
+                expires: selectedExpiry,
+                address: document.getElementById("fa").value
             });
 
             if(!data.ok){
                 alert(data.error);
                 return false;
             }
+            // Reset form
             document.forms[0].reset();
-            document.getElementById("fd").value = me.name;
+            selectedExpiry = null;
+            document.getElementById("expiry-display").textContent = "";
+            document.querySelectorAll("#quick-btns button").forEach(b => b.classList.remove("sel"));
+            document.getElementById("custom-wrap").style.display = "none";
             showRows();
             return false;
         }

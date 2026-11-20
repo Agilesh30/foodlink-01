@@ -7,9 +7,13 @@
     "start": "node server.js"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.119.2",
+    "bcryptjs": "^3.0.3",
     "connect-mongo": "^6.0.0",
+    "dotenv": "^18.0.10",
     "express": "^5.1.0",
     "express-session": "^1.18.0",
-    "mongoose": "^8.4.0"
+    "mongoose": "^8.4.0",
+    "resend": "^6.39.0"
   }
 }

@@ -40,8 +40,11 @@
             if(me == null){ return; }
             showNav();
 
-            // fill the name from the login
+            // fill the name and email from the login
             document.getElementById("un").value = me.name;
+            if (me.email) {
+                document.getElementById("um").value = me.email;
+            }
 
             let food = await api("/api/food/approved");
             let item = food.find(function(x){ return x._id == fid; });

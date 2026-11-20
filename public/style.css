@@ -4,6 +4,43 @@ body{ margin:0; background-color:#eef2f6; font-family:Arial, sans-serif; color:#
 a{ text-decoration:none; color:white; }
 h2{ text-align:center; margin:10px 0; }
 
+/* ── Global Loading Overlay ── */
+#fl-loader{
+    display:none;
+    position:fixed;
+    inset:0;
+    z-index:9999;
+    background:rgba(0,0,0,0.25);
+    backdrop-filter:blur(2px);
+    align-items:center;
+    justify-content:center;
+}
+#fl-loader.active{ display:flex; }
+.fl-spinner-box{
+    background:#fff;
+    border-radius:12px;
+    padding:24px 32px;
+    display:flex;
+    align-items:center;
+    gap:16px;
+    box-shadow:0 8px 32px rgba(0,0,0,0.18);
+    min-width:180px;
+}
+.fl-spinner{
+    width:26px; height:26px;
+    border:3px solid #dcfce7;
+    border-top-color:#16a34a;
+    border-radius:50%;
+    animation:fl-spin 0.75s linear infinite;
+    flex-shrink:0;
+}
+@keyframes fl-spin{ to{ transform:rotate(360deg); } }
+.fl-spinner-label{
+    font-size:14px;
+    font-weight:600;
+    color:#374151;
+}
+
 /* header: brand on the left, links on the right */
 header{
     background-color:#14532d;

@@ -3,19 +3,35 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Admin Dashboard</title>
+    <title>Admin Dashboard - FoodLink</title>
     <link rel="icon" type="image/png" href="favicon.png">
     <link rel="stylesheet" href="style.css">
+    <style>
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        th, td { padding: 10px; border-bottom: 1px solid #cbd5e1; text-align: left; }
+        th { background-color: #f1f5f9; color: #334155; }
+        select.assign-select { padding: 6px; font-size: 13px; border-radius: 6px; border: 1px solid #94a3b8; }
+    </style>
 </head>
 <body>
     <header id="hdr"></header>
 
     <div class="stats" id="stats"></div>
 
-    <h2>ALL LISTINGS</h2>
+    <h2>ALL LISTINGS & INSPECTOR ASSIGNMENTS</h2>
     <table>
         <thead>
-            <tr><th>Food</th><th>Donor</th><th>Servings</th><th>Expires</th><th>Status</th><th>Inspection</th><th>Claimed by</th><th>Action</th></tr>
+            <tr>
+                <th>Food</th>
+                <th>Donor</th>
+                <th>Servings</th>
+                <th>Expires</th>
+                <th>Status</th>
+                <th>Inspection</th>
+                <th>Assign Inspector</th>
+                <th>Claimed by</th>
+                <th>Action</th>
+            </tr>
         </thead>
         <tbody id="rows"></tbody>
     </table>
@@ -33,7 +49,11 @@
         }
 
         async function show(){
-            let list = await api("/api/admin/food");
+            let [list, inspectors] = await Promise.all([
+                api("/api/admin/food"),
+                api("/api/admin/inspectors")
+            ]);
+
             let meals=0, pending=0, approved=0, rejected=0, claimed=0;
             let rows = "";
 
@@ -51,13 +71,32 @@
                     action = '<button class="grey" onclick="reInspect(\''+f._id+'\')">Re-inspect</button> '+action;
                 }
 
+                // Inspector assignment dropdown
+                let assignCol = "";
+                if(f.approval == "pending" && f.status == "available"){
+                    assignCol = '<select class="assign-select" onchange="assignInspector(\''+f._id+'\', this.value)">';
+                    assignCol += '<option value="">-- Choose Inspector --</option>';
+                    for(let j=0; j<inspectors.length; j++){
+                        let ins = inspectors[j];
+                        let selected = (f.assignedInspector == ins.email) ? 'selected' : '';
+                        assignCol += '<option value="'+esc(ins.email)+'" '+selected+'>'+esc(ins.name)+' ('+esc(ins.email)+')</option>';
+                    }
+                    assignCol += '</select>';
+                    if(f.assignedInspector){
+                        assignCol += '<div style="font-size:11px; color:#16a34a; margin-top:2px;">Assigned</div>';
+                    }
+                } else {
+                    assignCol = f.assignedInspector ? '<span style="font-size:13px; color:#1e293b;">'+esc(f.assignedInspector)+'</span>' : '<span style="color:#94a3b8;">-</span>';
+                }
+
                 rows += '<tr>'+
-                    '<td>'+esc(f.name)+'</td>'+
+                    '<td><b>'+esc(f.name)+'</b></td>'+
                     '<td>'+esc(f.donor)+'</td>'+
                     '<td>'+f.servings+'</td>'+
                     '<td>'+fmt(f.expires)+'</td>'+
                     '<td><span class="badge '+f.status+'">'+f.status.replace("_"," ")+'</span></td>'+
                     '<td><span class="badge '+f.approval+'">'+f.approval+'</span></td>'+
+                    '<td>'+assignCol+'</td>'+
                     '<td>'+(f.claimer && f.claimer.name ? esc(f.claimer.name) : "-")+'</td>'+
                     '<td>'+action+'</td>'+
                     '</tr>';
@@ -70,6 +109,17 @@
                 "<span>Rejected: <b>"+rejected+"</b></span>"+
                 "<span>Claimed: <b>"+claimed+"</b></span>"+
                 "<span>Meals saved: <b>"+meals+"</b></span>";
+        }
+
+        async function assignInspector(foodId, inspectorEmail){
+            if(!inspectorEmail) return;
+            let res = await api("/api/admin/food/" + foodId + "/assign", "POST", { inspectorEmail: inspectorEmail });
+            if(!res.ok){
+                alert(res.error || "Could not assign inspector");
+            } else {
+                alert("Assigned to " + res.assignedTo + "! An email notification with pickup address and food details has been sent.");
+                show();
+            }
         }
 
         async function removeFood(id){

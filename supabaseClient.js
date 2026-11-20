@@ -1,0 +1,31 @@
+require("dotenv").config();
+const { createClient } = require("@supabase/supabase-js");
+
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || process.env.SUPABASE_ANON_KEY;
+
+let supabase = null;
+
+function getSupabase() {
+    if (!supabase) {
+        if (!supabaseUrl || !supabaseKey) {
+            throw new Error("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required in your environment variables (.env).");
+        }
+        supabase = createClient(supabaseUrl, supabaseKey, {
+            auth: {
+                persistSession: false,
+                autoRefreshToken: false
+            }
+        });
+    }
+    return supabase;
+}
+
+function isSupabaseConfigured() {
+    return Boolean(process.env.SUPABASE_URL && (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || process.env.SUPABASE_ANON_KEY));
+}
+
+module.exports = {
+    getSupabase,
+    isSupabaseConfigured
+};

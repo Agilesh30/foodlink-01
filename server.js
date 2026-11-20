@@ -1,293 +1,1010 @@
+require("dotenv").config();
 const express = require("express");
 const session = require("express-session");
-const { MongoStore } = require("connect-mongo");
-const mongoose = require("mongoose");
 const path = require("path");
+const bcrypt = require("bcryptjs");
 
-const User = require("./models/User");
-const Food = require("./models/Food");
+const crypto = require("crypto");
+
+const { getSupabase, isSupabaseConfigured } = require("./supabaseClient");
+const {
+    notifyAdminNewDonation,
+    notifyInspectorAssignment,
+    notifyNgosBulkFoodAvailable,
+    notifyInspectorPassedTask,
+    notifyDonorDecision,
+    sendPasswordResetEmail
+} = require("./emailService");
+
+// ── Stateless signed reset tokens (works across serverless instances) ──────────
+function _makeResetToken(email) {
+    const payload = Buffer.from(JSON.stringify({
+        email,
+        exp: Date.now() + 15 * 60 * 1000   // 15 min
+    })).toString("base64url");
+    const secret = process.env.SESSION_SECRET || "foodlink-secret";
+    const sig = crypto.createHmac("sha256", secret).update(payload).digest("base64url");
+    return `${payload}.${sig}`;
+}
+
+function _verifyResetToken(token) {
+    try {
+        const [payload, sig] = (token || "").split(".");
+        if (!payload || !sig) return null;
+        const secret = process.env.SESSION_SECRET || "foodlink-secret";
+        const expected = crypto.createHmac("sha256", secret).update(payload).digest("base64url");
+        if (sig !== expected) return null;
+        const data = JSON.parse(Buffer.from(payload, "base64url").toString());
+        if (!data.email || Date.now() > data.exp) return null;
+        return data.email;
+    } catch { return null; }
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const MONGO_URL = process.env.MONGODB_URI;
-let connectionPromise;
-let sessionMiddleware;
 
 app.set("trust proxy", 1);
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
-async function connectMongo() {
-    if (!MONGO_URL) {
-        throw new Error("MONGODB_URI is not configured");
+// ---------- Supabase Session Store ----------
+class SupabaseSessionStore extends session.Store {
+    constructor(supabase) {
+        super();
+        this.supabase = supabase;
+        this.fallbackMemory = new Map();
+        this.tableAvailable = true;
     }
 
-    if (mongoose.connection.readyState === 0 || mongoose.connection.readyState === 3) {
-        connectionPromise = null;
+    async get(sid, callback) {
+        if (!this.tableAvailable) {
+            const entry = this.fallbackMemory.get(sid);
+            if (!entry) return callback(null, null);
+            if (entry.expire && new Date(entry.expire) < new Date()) {
+                this.fallbackMemory.delete(sid);
+                return callback(null, null);
+            }
+            return callback(null, entry.sess);
+        }
+
+        try {
+            const { data, error } = await this.supabase
+                .from("sessions")
+                .select("sess, expire")
+                .eq("sid", sid)
+                .maybeSingle();
+
+            if (error) {
+                if (error.code === "42P01" || error.message?.includes("does not exist")) {
+                    this.tableAvailable = false;
+                    console.warn("[FoodLink] 'sessions' table not found in Supabase. Using in-memory fallback.");
+                    return this.get(sid, callback);
+                }
+                return callback(error);
+            }
+
+            if (!data) return callback(null, null);
+
+            if (data.expire && new Date(data.expire) < new Date()) {
+                await this.destroy(sid, () => {});
+                return callback(null, null);
+            }
+
+            return callback(null, data.sess);
+        } catch (err) {
+            return callback(err);
+        }
     }
 
-    if (!connectionPromise) {
-        connectionPromise = mongoose.connect(MONGO_URL, { serverSelectionTimeoutMS: 10000 })
-            .then(async function () {
-                await addSampleData();
-                sessionMiddleware = session({
-                    secret: process.env.SESSION_SECRET || "foodlink-secret",
-                    resave: false,
-                    saveUninitialized: false,
-                    store: MongoStore.create({
-                        client: mongoose.connection.getClient(),
-                        collectionName: "sessions"
-                    }),
-                    cookie: {
-                        httpOnly: true,
-                        secure: process.env.NODE_ENV === "production",
-                        sameSite: "lax",
-                        maxAge: 1000 * 60 * 60 * 24 * 7
-                    }
-                });
-            })
-            .catch(function (error) {
-                connectionPromise = null;
-                throw error;
-            });
+    async set(sid, sess, callback) {
+        let expire;
+        if (sess && sess.cookie && sess.cookie.expires) {
+            expire = new Date(sess.cookie.expires).toISOString();
+        } else {
+            expire = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+        }
+
+        if (!this.tableAvailable) {
+            this.fallbackMemory.set(sid, { sess, expire });
+            return callback && callback(null);
+        }
+
+        try {
+            const { error } = await this.supabase
+                .from("sessions")
+                .upsert({ sid, sess, expire });
+
+            if (error) {
+                if (error.code === "42P01" || error.message?.includes("does not exist")) {
+                    this.tableAvailable = false;
+                    this.fallbackMemory.set(sid, { sess, expire });
+                    return callback && callback(null);
+                }
+                return callback && callback(error);
+            }
+            return callback && callback(null);
+        } catch (err) {
+            return callback && callback(err);
+        }
     }
 
-    await connectionPromise;
+    async destroy(sid, callback) {
+        this.fallbackMemory.delete(sid);
+        if (!this.tableAvailable) {
+            return callback && callback(null);
+        }
+        try {
+            const { error } = await this.supabase
+                .from("sessions")
+                .delete()
+                .eq("sid", sid);
+            return callback && callback(error || null);
+        } catch (err) {
+            return callback && callback(err);
+        }
+    }
+
+    async touch(sid, sess, callback) {
+        return this.set(sid, sess, callback);
+    }
 }
 
+let sessionMiddleware = null;
+let initialized = false;
+
+async function initDatabase() {
+    if (initialized) return;
+
+    if (isSupabaseConfigured()) {
+        const supabase = getSupabase();
+        sessionMiddleware = session({
+            secret: process.env.SESSION_SECRET || "foodlink-secret",
+            resave: false,
+            saveUninitialized: false,
+            store: new SupabaseSessionStore(supabase),
+            cookie: {
+                httpOnly: true,
+                secure: process.env.NODE_ENV === "production",
+                sameSite: "lax",
+                maxAge: 1000 * 60 * 60 * 24 * 7
+            }
+        });
+        initialized = true;
+        console.log("[FoodLink] Supabase initialized.");
+    } else if (process.env.MONGODB_URI) {
+        const mongoose = require("mongoose");
+        const { MongoStore } = require("connect-mongo");
+        await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 10000 });
+        sessionMiddleware = session({
+            secret: process.env.SESSION_SECRET || "foodlink-secret",
+            resave: false,
+            saveUninitialized: false,
+            store: MongoStore.create({
+                client: mongoose.connection.getClient(),
+                collectionName: "sessions"
+            }),
+            cookie: {
+                httpOnly: true,
+                secure: process.env.NODE_ENV === "production",
+                sameSite: "lax",
+                maxAge: 1000 * 60 * 60 * 24 * 7
+            }
+        });
+        initialized = true;
+        console.log("[FoodLink] MongoDB initialized as fallback.");
+    } else {
+        throw new Error("No database configured. Please configure SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in your .env file.");
+    }
+}
+
+// Database & session middleware for /api routes
 app.use("/api", async function (req, res, next) {
     try {
-        await connectMongo();
+        await initDatabase();
         sessionMiddleware(req, res, next);
     } catch (error) {
-        console.error("[v0] MongoDB initialization failed:", error.message);
-        res.status(503).json({ error: "The database is unavailable. Check the MongoDB connection configuration." });
+        console.error("[FoodLink] Database initialization failed:", error.message);
+        res.status(503).json({
+            error: "The database is unavailable. " + error.message
+        });
     }
 });
 
+// ---------- Helpers & Formatting ----------
 
-// ---------- helpers ----------
+function formatFood(f) {
+    if (!f) return null;
+    return {
+        _id: f.id,
+        id: f.id,
+        name: f.name,
+        servings: f.servings,
+        veg: f.veg,
+        nature: f.nature,
+        expires: f.expires,
+        address: f.address,
+        donor: f.donor,
+        donorUser: f.donor_user,
+        donor_user: f.donor_user,
+        phone: f.phone,
+        status: f.status,
+        approval: f.approval,
+        inspectNote: f.inspect_note,
+        inspect_note: f.inspect_note,
+        inspectedAt: f.inspected_at,
+        inspected_at: f.inspected_at,
+        code: f.code,
+        assignedInspector: f.assigned_inspector,
+        assigned_inspector: f.assigned_inspector,
+        claimedAt: f.claimed_at,
+        claimed_at: f.claimed_at,
+        claimedBy: f.claimed_by,
+        claimed_by: f.claimed_by,
+        claimer: f.claimer
+    };
+}
 
-// only let the given role use a route
 function needRole(role) {
     return function (req, res, next) {
-        if (!req.session.user) {
+        if (!req.session || !req.session.user) {
             return res.status(401).json({ error: "Please login" });
         }
-        if (req.session.user.role != role) {
+        if (req.session.user.role !== role) {
             return res.status(403).json({ error: "Not allowed" });
         }
         next();
     };
 }
 
-// anything past its expiry time becomes "expired"
-async function markExpired() {
-    await Food.updateMany(
-        { status: "available", expires: { $lt: new Date() } },
-        { status: "expired" }
-    );
+async function markExpired(supabase) {
+    try {
+        await supabase
+            .from("foods")
+            .update({ status: "expired" })
+            .eq("status", "available")
+            .lt("expires", new Date().toISOString());
+    } catch (err) {
+        console.warn("[FoodLink] markExpired check failed:", err.message);
+    }
 }
 
+// ---------- API Routes ----------
 
-// ---------- login ----------
-
-app.post("/api/login", async function (req, res) {
-    const found = await User.findOne({ username: req.body.username, password: req.body.password });
-    if (found == null) {
-        return res.json({ ok: false });
-    }
-    req.session.user = { username: found.username, name: found.name, role: found.role };
-    res.json({ ok: true, role: found.role });
-});
-
-app.post("/api/logout", function (req, res) {
-    req.session.destroy(function () {
-        res.json({ ok: true });
+// Health Check
+app.get("/api/health", function (req, res) {
+    res.json({
+        ok: true,
+        database: isSupabaseConfigured() ? "supabase" : (process.env.MONGODB_URI ? "mongodb" : "none")
     });
 });
 
-// who is logged in (user is null if nobody)
-app.get("/api/me", function (req, res) {
-    res.json({ user: req.session.user || null });
+// ---------- Real-Time Authentication (Email-Based) ----------
+
+// Register a real user account in real time using email
+app.post("/api/register", async function (req, res) {
+    try {
+        const { email, password, role, name, phone } = req.body;
+
+        if (!email || !password || !role || !name) {
+            return res.status(400).json({ ok: false, error: "Please fill in all required fields." });
+        }
+
+        const cleanEmail = String(email).toLowerCase().trim();
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(cleanEmail)) {
+            return res.status(400).json({ ok: false, error: "Please enter a valid email address." });
+        }
+
+        if (String(password).length < 6) {
+            return res.status(400).json({ ok: false, error: "Password must be at least 6 characters." });
+        }
+
+        const validRoles = ["donor", "ngo"];
+        if (!validRoles.includes(role)) {
+            return res.status(400).json({ ok: false, error: "Only Donor and NGO accounts can be registered." });
+        }
+
+        const supabase = getSupabase();
+
+        // Check if email or username already exists
+        let { data: existingUser } = await supabase
+            .from("users")
+            .select("id")
+            .ilike("email", cleanEmail)
+            .maybeSingle();
+
+        if (!existingUser) {
+            try {
+                const { data: userByUsername } = await supabase
+                    .from("users")
+                    .select("id")
+                    .ilike("username", cleanEmail)
+                    .maybeSingle();
+                if (userByUsername) existingUser = userByUsername;
+            } catch (e) {}
+        }
+
+        if (existingUser) {
+            return res.json({ ok: false, error: "An account with this email already exists." });
+        }
+
+        // Hash password securely
+        const passwordHash = await bcrypt.hash(password, 10);
+
+        const userData = {
+            email: cleanEmail,
+            username: cleanEmail, // populates username to satisfy legacy not-null constraint if column exists
+            password_hash: passwordHash,
+            role: role,
+            name: String(name).trim(),
+            phone: phone ? String(phone).trim() : null
+        };
+
+        let { data: newUser, error: insertErr } = await supabase
+            .from("users")
+            .insert(userData)
+            .select("id, email, name, role")
+            .single();
+
+        // If the table doesn't have the username column, retry without it
+        if (insertErr && insertErr.message && insertErr.message.includes("username")) {
+            delete userData.username;
+            const retry = await supabase
+                .from("users")
+                .insert(userData)
+                .select("id, email, name, role")
+                .single();
+            newUser = retry.data;
+            insertErr = retry.error;
+        }
+
+        if (insertErr || !newUser) {
+            console.error("[FoodLink] Registration error:", insertErr);
+            return res.status(500).json({ ok: false, error: "Could not create account: " + (insertErr ? insertErr.message : "Unknown error") });
+        }
+
+        // Establish real-time session
+        req.session.user = {
+            id: newUser.id,
+            email: newUser.email,
+            username: newUser.email,
+            name: newUser.name,
+            phone: phone ? String(phone).trim() : null,
+            role: newUser.role
+        };
+
+        res.json({ ok: true, role: newUser.role });
+    } catch (err) {
+        console.error("[FoodLink] Registration exception:", err);
+        res.status(500).json({ ok: false, error: err.message });
+    }
 });
 
+// Login real user using email
+app.post("/api/login", async function (req, res) {
+    try {
+        const emailInput = String(req.body.email || req.body.username || "").toLowerCase().trim();
+        const passwordInput = String(req.body.password || "");
 
-// ---------- donor ----------
+        if (!emailInput || !passwordInput) {
+            return res.json({ ok: false, error: "Email and password required." });
+        }
 
-// add new food (starts as pending, inspector must approve)
+        const supabase = getSupabase();
+        let { data: user } = await supabase
+            .from("users")
+            .select("id, email, password_hash, name, phone, role")
+            .ilike("email", emailInput)
+            .maybeSingle();
+
+        if (!user) {
+            try {
+                const { data: userByUsername } = await supabase
+                    .from("users")
+                    .select("id, email, password_hash, name, phone, role")
+                    .ilike("username", emailInput)
+                    .maybeSingle();
+                if (userByUsername) user = userByUsername;
+            } catch (e) {}
+        }
+
+        if (!user) {
+            return res.json({ ok: false, error: "Incorrect email or password." });
+        }
+
+        // Verify password against hash
+        let passwordMatches = false;
+        if (user.password_hash) {
+            passwordMatches = await bcrypt.compare(passwordInput, user.password_hash);
+        } else if (user.password) {
+            // Backward compatibility for plain text
+            passwordMatches = (user.password === passwordInput);
+        }
+
+        if (!passwordMatches) {
+            return res.json({ ok: false, error: "Incorrect email or password." });
+        }
+
+        req.session.user = {
+            id: user.id,
+            email: user.email,
+            username: user.email,
+            name: user.name,
+            phone: user.phone || null,
+            role: user.role
+        };
+
+        res.json({ ok: true, role: user.role });
+    } catch (err) {
+        console.error("[FoodLink] Login error:", err);
+        res.status(500).json({ ok: false, error: err.message });
+    }
+});
+
+// Logout
+app.post("/api/logout", function (req, res) {
+    if (req.session) {
+        req.session.destroy(function () {
+            res.json({ ok: true });
+        });
+    } else {
+        res.json({ ok: true });
+    }
+});
+
+// Get current session user
+app.get("/api/me", function (req, res) {
+    res.json({ user: (req.session && req.session.user) ? req.session.user : null });
+});
+
+// ---------- Forgot / Reset Password ----------
+
+app.post("/api/forgot-password", async function (req, res) {
+    const email = String(req.body.email || "").trim().toLowerCase();
+    if (!email) return res.json({ ok: false, error: "Please enter your email address." });
+
+    const supabase = getSupabase();
+    const { data: user } = await supabase
+        .from("users")
+        .select("id, email, name")
+        .ilike("email", email)
+        .maybeSingle();
+
+    // Always respond ok to prevent email enumeration
+    if (!user) return res.json({ ok: true });
+
+    // Auto-detect base URL from request (works on Vercel, localhost, any host)
+    const baseUrl = process.env.APP_URL ||
+        `${req.protocol}://${req.get("host")}`;
+
+    // Generate signed stateless token (safe for serverless)
+    const token = _makeResetToken(user.email);
+    const resetUrl = `${baseUrl}/reset-password.html?token=${token}`;
+    (async () => {
+        try { await sendPasswordResetEmail(user.email, resetUrl); } catch (e) {
+            console.error("[FoodLink] Reset email error:", e.message);
+        }
+    })();
+
+    res.json({ ok: true });
+});
+
+app.post("/api/reset-password", async function (req, res) {
+    const token = String(req.body.token || "").trim();
+    const newPassword = String(req.body.password || "").trim();
+
+    if (!token || !newPassword || newPassword.length < 6) {
+        return res.json({ ok: false, error: "Invalid request. Password must be at least 6 characters." });
+    }
+
+    const email = _verifyResetToken(token);
+    if (!email) {
+        return res.json({ ok: false, error: "This reset link has expired. Please request a new one." });
+    }
+
+    const hash = await bcrypt.hash(newPassword, 10);
+    const supabase = getSupabase();
+    const { error } = await supabase
+        .from("users")
+        .update({ password_hash: hash })
+        .ilike("email", email);
+
+    if (error) return res.status(500).json({ ok: false, error: "Could not update password. Please try again." });
+
+    res.json({ ok: true });
+});
+
+// ---------- Donor Routes ----------
+
 app.post("/api/food", needRole("donor"), async function (req, res) {
     const b = req.body;
     if (new Date(b.expires) <= new Date()) {
         return res.json({ ok: false, error: "Expiry time must be in the future." });
     }
-    await Food.create({
+
+    const supabase = getSupabase();
+    const foodPayload = {
         name: b.name,
         servings: Number(b.servings),
-        veg: b.veg,
+        veg: Boolean(b.veg),
         nature: b.nature,
-        expires: new Date(b.expires),
+        expires: new Date(b.expires).toISOString(),
         address: b.address,
-        donor: b.donor,
-        donorUser: req.session.user.username,
-        phone: b.phone,
+        donor: req.session.user.name,
+        donor_user: req.session.user.email || req.session.user.username,
+        phone: req.session.user.phone || b.phone || '',
         status: "available",
         approval: "pending"
-    });
+    };
+
+    const { data: newFood, error } = await supabase
+        .from("foods")
+        .insert(foodPayload)
+        .select()
+        .single();
+
+    if (error) {
+        console.error("[FoodLink] Error creating food listing:", error);
+        return res.status(500).json({ ok: false, error: error.message });
+    }
+
+    // Trigger Notification 1: Email Admin that donor added food
+    (async () => {
+        try {
+            const { data: admins } = await supabase
+                .from("users")
+                .select("email")
+                .eq("role", "admin");
+
+            const adminEmails = (admins || []).map(a => a.email).filter(Boolean);
+            if (process.env.ADMIN_EMAIL && !adminEmails.includes(process.env.ADMIN_EMAIL)) {
+                adminEmails.push(process.env.ADMIN_EMAIL);
+            }
+            if (adminEmails.length > 0) {
+                await notifyAdminNewDonation(newFood || foodPayload, adminEmails);
+            }
+        } catch (mailErr) {
+            console.error("[FoodLink] Admin email notification error:", mailErr.message);
+        }
+    })();
+
     res.json({ ok: true });
 });
 
-// the donor's own listings
 app.get("/api/food/mine", needRole("donor"), async function (req, res) {
-    await markExpired();
-    const list = await Food.find({ donorUser: req.session.user.username }).select("-code");
+    const supabase = getSupabase();
+    await markExpired(supabase);
+
+    const userEmail = req.session.user.email || req.session.user.username;
+    const { data, error } = await supabase
+        .from("foods")
+        .select("*")
+        .eq("donor_user", userEmail)
+        .order("created_at", { ascending: false });
+
+    if (error) {
+        return res.status(500).json({ error: error.message });
+    }
+
+    const list = (data || []).map(formatFood).map(item => {
+        delete item.code;
+        return item;
+    });
     res.json(list);
 });
 
-// donor types the code the ngo shows
 app.post("/api/food/:id/pickup", needRole("donor"), async function (req, res) {
-    const f = await Food.findOne({ _id: req.params.id, donorUser: req.session.user.username });
-    if (f == null || f.status != "claimed") {
-        return res.json({ ok: false, error: "Listing not found." });
+    const supabase = getSupabase();
+    const userEmail = req.session.user.email || req.session.user.username;
+    const { data: f, error } = await supabase
+        .from("foods")
+        .select("*")
+        .eq("id", req.params.id)
+        .eq("donor_user", userEmail)
+        .maybeSingle();
+
+    if (error || !f || f.status !== "claimed") {
+        return res.json({ ok: false, error: "Listing not found or not in claimed status." });
     }
-    if (req.body.code != f.code) {
-        return res.json({ ok: false, error: "Wrong code." });
+    if (String(req.body.code).trim() !== String(f.code).trim()) {
+        return res.json({ ok: false, error: "Wrong pickup verification code." });
     }
-    f.status = "picked_up";
-    await f.save();
+
+    const { error: updateErr } = await supabase
+        .from("foods")
+        .update({ status: "picked_up" })
+        .eq("id", req.params.id);
+
+    if (updateErr) {
+        return res.status(500).json({ ok: false, error: updateErr.message });
+    }
     res.json({ ok: true });
 });
 
 app.delete("/api/food/:id", needRole("donor"), async function (req, res) {
-    await Food.deleteOne({ _id: req.params.id, donorUser: req.session.user.username });
+    const supabase = getSupabase();
+    const userEmail = req.session.user.email || req.session.user.username;
+    await supabase
+        .from("foods")
+        .delete()
+        .eq("id", req.params.id)
+        .eq("donor_user", userEmail);
+
     res.json({ ok: true });
 });
 
+// ---------- NGO Routes ----------
 
-// ---------- ngo ----------
-
-// only food approved by the inspector is shown
 app.get("/api/food/approved", needRole("ngo"), async function (req, res) {
-    await markExpired();
-    const list = await Food.find({ approval: "approved" }).select("-code -claimer -claimedBy");
+    const supabase = getSupabase();
+    await markExpired(supabase);
+
+    const { data, error } = await supabase
+        .from("foods")
+        .select("*")
+        .eq("approval", "approved")
+        .order("created_at", { ascending: false });
+
+    if (error) {
+        return res.status(500).json({ error: error.message });
+    }
+
+    const list = (data || []).map(formatFood).map(item => {
+        delete item.code;
+        delete item.claimer;
+        delete item.claimedBy;
+        delete item.claimed_by;
+        return item;
+    });
     res.json(list);
 });
 
-// claim a food and get the 4 digit code
 app.post("/api/food/:id/claim", needRole("ngo"), async function (req, res) {
     const code = String(Math.floor(1000 + Math.random() * 9000));
+    const supabase = getSupabase();
 
-    // this only works if the food is still available, so two people cannot claim the same food
-    const f = await Food.findOneAndUpdate(
-        { _id: req.params.id, status: "available", approval: "approved", expires: { $gt: new Date() } },
-        {
+    const userEmail = req.session.user.email || req.session.user.username;
+    const { data, error } = await supabase
+        .from("foods")
+        .update({
             status: "claimed",
             code: code,
-            claimedAt: new Date(),
-            claimedBy: req.session.user.username,
+            claimed_at: new Date().toISOString(),
+            claimed_by: userEmail,
             claimer: {
                 name: req.body.name,
                 phone: req.body.phone,
                 mail: req.body.mail,
                 kind: req.body.kind
             }
-        },
-        { new: true }
-    );
-    if (f == null) {
-        return res.json({ ok: false });
+        })
+        .eq("id", req.params.id)
+        .eq("status", "available")
+        .eq("approval", "approved")
+        .gt("expires", new Date().toISOString())
+        .select();
+
+    if (error || !data || data.length === 0) {
+        return res.json({ ok: false, error: "This listing is no longer available." });
     }
     res.json({ ok: true });
 });
 
-// everything this ngo has claimed
 app.get("/api/claims", needRole("ngo"), async function (req, res) {
-    const list = await Food.find({ claimedBy: req.session.user.username }).sort({ claimedAt: -1 });
-    res.json(list);
+    const supabase = getSupabase();
+    const userEmail = req.session.user.email || req.session.user.username;
+    const { data, error } = await supabase
+        .from("foods")
+        .select("*")
+        .eq("claimed_by", userEmail)
+        .order("claimed_at", { ascending: false });
+
+    if (error) {
+        return res.status(500).json({ error: error.message });
+    }
+    res.json((data || []).map(formatFood));
 });
 
-
-// ---------- inspector ----------
+// ---------- Inspector Routes ----------
 
 app.get("/api/inspections", needRole("inspector"), async function (req, res) {
-    await markExpired();
-    const pending = await Food.find({ approval: "pending", status: "available" }).select("-code");
-    const done = await Food.find({ approval: { $in: ["approved", "rejected"] } }).select("-code");
-    res.json({ pending: pending, done: done });
+    const supabase = getSupabase();
+    await markExpired(supabase);
+
+    const inspectorEmail = req.session.user.email || req.session.user.username;
+
+    // ONLY show pending food assigned specifically to this inspector by Admin
+    let { data: pendingData, error: pendingErr } = await supabase
+        .from("foods")
+        .select("*")
+        .eq("approval", "pending")
+        .eq("status", "available")
+        .eq("assigned_inspector", inspectorEmail)
+        .order("created_at", { ascending: false });
+
+    // Fallback if column not yet queried
+    if (pendingErr) {
+        pendingData = [];
+    }
+
+    const { data: doneData } = await supabase
+        .from("foods")
+        .select("*")
+        .in("approval", ["approved", "rejected"])
+        .eq("assigned_inspector", inspectorEmail)
+        .order("inspected_at", { ascending: false });
+
+    const pending = (pendingData || []).map(formatFood).map(item => {
+        delete item.code;
+        return item;
+    });
+    const done = (doneData || []).map(formatFood).map(item => {
+        delete item.code;
+        return item;
+    });
+
+    res.json({ pending, done });
+});
+
+// Inspector passes task to the other inspector
+app.post("/api/food/:id/pass", needRole("inspector"), async function (req, res) {
+    const supabase = getSupabase();
+    const currentEmail = req.session.user.email || req.session.user.username;
+
+    // Find the other inspector
+    const { data: otherInspectors, error: insErr } = await supabase
+        .from("users")
+        .select("name, email")
+        .eq("role", "inspector")
+        .neq("email", currentEmail);
+
+    if (insErr || !otherInspectors || otherInspectors.length === 0) {
+        return res.status(400).json({ ok: false, error: "No other inspector available to pass task to." });
+    }
+
+    const targetInspector = otherInspectors[0];
+
+    // Reassign food to the other inspector
+    const { data: updatedFood, error: updateErr } = await supabase
+        .from("foods")
+        .update({ assigned_inspector: targetInspector.email })
+        .eq("id", req.params.id)
+        .eq("assigned_inspector", currentEmail)
+        .select()
+        .single();
+
+    if (updateErr || !updatedFood) {
+        return res.status(500).json({ ok: false, error: "Could not pass inspection task." });
+    }
+
+    // Trigger Notification: Email the other inspector that task was transferred
+    (async () => {
+        try {
+            await notifyInspectorPassedTask(
+                targetInspector.email,
+                targetInspector.name,
+                req.session.user.name,
+                updatedFood
+            );
+        } catch (mailErr) {
+            console.error("[FoodLink] Error emailing other inspector:", mailErr.message);
+        }
+    })();
+
+    // Notify donor that food is being re-reviewed
+    if (updatedFood && updatedFood.donor_user) {
+        (async () => {
+            try {
+                const { data: donor } = await supabase
+                    .from("users")
+                    .select("name, email")
+                    .ilike("email", updatedFood.donor_user)
+                    .maybeSingle();
+                if (donor) {
+                    await notifyDonorDecision(
+                        donor.email,
+                        donor.name,
+                        updatedFood,
+                        "passed",
+                        { inspectorName: req.session.user.name, passedTo: targetInspector.name }
+                    );
+                }
+            } catch (mailErr) {
+                console.error("[FoodLink] Donor pass email error:", mailErr.message);
+            }
+        })();
+    }
+
+    res.json({ ok: true, passedTo: targetInspector.name, targetEmail: targetInspector.email });
 });
 
 app.post("/api/food/:id/inspect", needRole("inspector"), async function (req, res) {
     const note = String(req.body.note || "").trim();
-    if (!req.body.ok && note == "") {
+    if (!req.body.ok && note === "") {
         return res.json({ ok: false, error: "Please write a reason to reject." });
     }
-    await Food.findByIdAndUpdate(req.params.id, {
-        approval: req.body.ok ? "approved" : "rejected",
-        inspectNote: note,
-        inspectedAt: new Date()
-    });
+
+    const supabase = getSupabase();
+    const { data: updatedFood, error } = await supabase
+        .from("foods")
+        .update({
+            approval: req.body.ok ? "approved" : "rejected",
+            inspect_note: note,
+            inspected_at: new Date().toISOString()
+        })
+        .eq("id", req.params.id)
+        .select()
+        .single();
+
+    if (error) {
+        return res.status(500).json({ ok: false, error: error.message });
+    }
+
+    // Trigger Notification 3: If approved and servings > 50, notify all NGOs
+    if (req.body.ok && updatedFood && Number(updatedFood.servings) > 50) {
+        (async () => {
+            try {
+                const { data: ngos } = await supabase
+                    .from("users")
+                    .select("email")
+                    .eq("role", "ngo");
+
+                const ngoEmails = (ngos || []).map(n => n.email).filter(Boolean);
+                if (ngoEmails.length > 0) {
+                    await notifyNgosBulkFoodAvailable(updatedFood, ngoEmails);
+                }
+            } catch (mailErr) {
+                console.error("[FoodLink] NGO bulk food email error:", mailErr.message);
+            }
+        })();
+    }
+
+    // Notify donor of decision
+    if (updatedFood && updatedFood.donor_user) {
+        (async () => {
+            try {
+                const { data: donor } = await supabase
+                    .from("users")
+                    .select("name, email")
+                    .ilike("email", updatedFood.donor_user)
+                    .maybeSingle();
+                if (donor) {
+                    await notifyDonorDecision(
+                        donor.email,
+                        donor.name,
+                        updatedFood,
+                        req.body.ok ? "approved" : "rejected",
+                        { inspectorName: req.session.user.name, reason: note }
+                    );
+                }
+            } catch (mailErr) {
+                console.error("[FoodLink] Donor decision email error:", mailErr.message);
+            }
+        })();
+    }
+
     res.json({ ok: true });
 });
 
+// ---------- Admin Routes ----------
 
-// ---------- admin ----------
+// Get all registered inspectors for admin assignment dropdown
+app.get("/api/admin/inspectors", needRole("admin"), async function (req, res) {
+    const supabase = getSupabase();
+    const { data, error } = await supabase
+        .from("users")
+        .select("id, name, email")
+        .eq("role", "inspector")
+        .order("name", { ascending: true });
+
+    if (error) {
+        return res.status(500).json({ error: error.message });
+    }
+    res.json(data || []);
+});
+
+// Admin assigns an inspector to a food listing
+app.post("/api/admin/food/:id/assign", needRole("admin"), async function (req, res) {
+    const inspectorEmail = String(req.body.inspectorEmail || "").trim().toLowerCase();
+    if (!inspectorEmail) {
+        return res.status(400).json({ ok: false, error: "Please select an inspector." });
+    }
+
+    const supabase = getSupabase();
+
+    // Verify inspector exists
+    const { data: inspector } = await supabase
+        .from("users")
+        .select("name, email")
+        .ilike("email", inspectorEmail)
+        .eq("role", "inspector")
+        .maybeSingle();
+
+    if (!inspector) {
+        return res.status(404).json({ ok: false, error: "Inspector not found." });
+    }
+
+    // Assign inspector in database
+    const { data: food, error } = await supabase
+        .from("foods")
+        .update({ assigned_inspector: inspector.email })
+        .eq("id", req.params.id)
+        .select()
+        .single();
+
+    if (error || !food) {
+        return res.status(500).json({ ok: false, error: error ? error.message : "Food listing not found" });
+    }
+
+    // Trigger Notification 2: Email Assigned Inspector with location & food details
+    (async () => {
+        try {
+            await notifyInspectorAssignment(inspector.email, inspector.name, food);
+        } catch (mailErr) {
+            console.error("[FoodLink] Inspector email notification error:", mailErr.message);
+        }
+    })();
+
+    res.json({ ok: true, assignedTo: inspector.name, inspectorEmail: inspector.email });
+});
 
 app.get("/api/admin/food", needRole("admin"), async function (req, res) {
-    await markExpired();
-    const list = await Food.find().select("-code");
+    const supabase = getSupabase();
+    await markExpired(supabase);
+
+    const { data, error } = await supabase
+        .from("foods")
+        .select("*")
+        .order("created_at", { ascending: false });
+
+    if (error) {
+        return res.status(500).json({ error: error.message });
+    }
+
+    const list = (data || []).map(formatFood).map(item => {
+        delete item.code;
+        return item;
+    });
     res.json(list);
 });
 
 app.delete("/api/admin/food/:id", needRole("admin"), async function (req, res) {
-    await Food.findByIdAndDelete(req.params.id);
+    const supabase = getSupabase();
+    await supabase
+        .from("foods")
+        .delete()
+        .eq("id", req.params.id);
+
     res.json({ ok: true });
 });
 
-// send back to the inspector (only if nobody has claimed it)
 app.post("/api/admin/food/:id/reinspect", needRole("admin"), async function (req, res) {
-    await Food.updateOne(
-        { _id: req.params.id, status: "available" },
-        { approval: "pending", inspectNote: "" }
-    );
+    const supabase = getSupabase();
+    await supabase
+        .from("foods")
+        .update({
+            approval: "pending",
+            inspect_note: ""
+        })
+        .eq("id", req.params.id)
+        .eq("status", "available");
+
     res.json({ ok: true });
 });
 
-
-// ---------- sample data (only the first time) ----------
-
-async function addSampleData() {
-    if (await User.countDocuments() == 0) {
-        await User.insertMany([
-            { username: "donor",     password: "donor123",   role: "donor",     name: "Green Mess" },
-            { username: "ngo",       password: "ngo123",     role: "ngo",       name: "Hope NGO" },
-            { username: "admin",     password: "admin123",   role: "admin",     name: "Admin" },
-            { username: "inspector", password: "inspect123", role: "inspector", name: "Inspector" }
-        ]);
-    }
-
-    if (await Food.countDocuments() == 0) {
-        const h = 3600000;
-        await Food.insertMany([
-            { name: "Veg Biryani",   servings: 20, veg: true,  nature: "Freshly cooked", expires: new Date(Date.now() + 3 * h), address: "Hostel Mess, Block A", donor: "Hostel Mess", donorUser: "donor", phone: "9876543210", status: "available", approval: "approved" },
-            { name: "Bread Packets", servings: 40, veg: true,  nature: "Packaged",       expires: new Date(Date.now() + 8 * h), address: "Canteen, Main Gate",   donor: "Canteen",     donorUser: "donor", phone: "9876543211", status: "available", approval: "approved" },
-            { name: "Chicken Curry", servings: 15, veg: false, nature: "Freshly cooked", expires: new Date(Date.now() + 2 * h), address: "Fest Ground, Stall 4", donor: "Fest Team",   donorUser: "donor", phone: "9876543212", status: "available", approval: "pending" }
-        ]);
-    }
-}
-
-
-// ---------- start ----------
-
+// ---------- Start Server ----------
 if (require.main === module) {
-    connectMongo()
+    initDatabase()
         .then(function () {
             app.listen(PORT, function () {
                 console.log("FoodLink running on port " + PORT);
             });
         })
         .catch(function (error) {
-            console.error("[v0] Could not start FoodLink:", error.message);
-            process.exitCode = 1;
+            console.error("[FoodLink] Warning: Database connection issue:", error.message);
+            app.listen(PORT, function () {
+                console.log("FoodLink running on port " + PORT + " (waiting for credentials)");
+            });
         });
 }
 

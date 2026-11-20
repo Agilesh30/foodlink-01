@@ -41,8 +41,10 @@
 
             for(let i=0;i<data.pending.length;i++){
                 let f = data.pending[i];
+                let assignedBadge = f.assignedInspector ? '<div style="margin-bottom:6px;"><span class="badge approved">📍 Assigned to You</span></div>' : '';
                 html += '<div class="card">'+
                     '<h2>'+esc(f.name)+'</h2>'+
+                    assignedBadge+
                     '<pre>'+
                     '<b>SERVINGS :</b> '+f.servings+'\n'+
                     '<b>TYPE     :</b> '+(f.veg?"Veg":"Non-veg")+' / '+esc(f.nature)+'\n'+
@@ -50,10 +52,12 @@
                     '<b>DONOR    :</b> '+esc(f.donor)+' ('+esc(f.phone)+')\n'+
                     '<b>EXPIRES  :</b> '+fmt(f.expires)+
                     '</pre>'+
-                    '<input id="n'+f._id+'" type="text" placeholder="Note (needed to reject)">'+
-                    '<br><br>'+
-                    '<button onclick="decide(\''+f._id+'\',true)">Tasted - Approve</button> '+
-                    '<button class="red" onclick="decide(\''+f._id+'\',false)">Reject</button>'+
+                    '<input id="n'+f._id+'" type="text" placeholder="Note (required if rejecting)">'+
+                    '<div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:10px;">'+
+                    '<button onclick="decide(\''+f._id+'\',true)" style="flex:1; background-color:#16a34a;">Accept</button> '+
+                    '<button class="red" onclick="decide(\''+f._id+'\',false)" style="flex:1;">Reject</button>'+
+                    '<button class="grey" onclick="passToOther(\''+f._id+'\')" style="width:100%; margin-top:4px; font-size:14px;">Pass to Other Inspector</button>'+
+                    '</div>'+
                     '</div>';
             }
 
@@ -80,8 +84,23 @@
                 alert("Please write a reason to reject.");
                 return;
             }
-            await api("/api/food/"+id+"/inspect", "POST", { ok:ok, note:note });
+            let data = await api("/api/food/"+id+"/inspect", "POST", { ok:ok, note:note });
+            if(!data.ok){
+                alert(data.error);
+                return;
+            }
             show();
+        }
+
+        async function passToOther(id){
+            if(!confirm("Pass this food inspection task to the other inspector?")){ return; }
+            let res = await api("/api/food/"+id+"/pass", "POST");
+            if(!res.ok){
+                alert(res.error || "Could not pass inspection task.");
+            } else {
+                alert("Task successfully passed to " + res.passedTo + " (" + res.targetEmail + ")! An email notification has been sent.");
+                show();
+            }
         }
     </script>
 </body>

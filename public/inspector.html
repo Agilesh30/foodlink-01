@@ -42,9 +42,15 @@
             for(let i=0;i<data.pending.length;i++){
                 let f = data.pending[i];
                 let assignedBadge = f.assignedInspector ? '<div style="margin-bottom:6px;"><span class="badge approved">📍 Assigned to You</span></div>' : '';
+
+                // NEW: if this task was already passed once, only Accept / Reject are shown
+                let passedBadge = f.passedBy ? '<div style="margin-bottom:6px;"><span class="badge pending">↪ Passed to you by '+esc(f.passedBy)+'</span></div>' : '';
+                let passButton = f.passedBy ? '' : '<button class="grey" onclick="passToOther(\''+f._id+'\')" style="width:100%; margin-top:4px; font-size:14px;">Pass to Other Inspector</button>';
+
                 html += '<div class="card">'+
                     '<h2>'+esc(f.name)+'</h2>'+
                     assignedBadge+
+                    passedBadge+
                     '<pre>'+
                     '<b>SERVINGS :</b> '+f.servings+'\n'+
                     '<b>TYPE     :</b> '+(f.veg?"Veg":"Non-veg")+' / '+esc(f.nature)+'\n'+
@@ -56,7 +62,7 @@
                     '<div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:10px;">'+
                     '<button onclick="decide(\''+f._id+'\',true)" style="flex:1; background-color:#16a34a;">Accept</button> '+
                     '<button class="red" onclick="decide(\''+f._id+'\',false)" style="flex:1;">Reject</button>'+
-                    '<button class="grey" onclick="passToOther(\''+f._id+'\')" style="width:100%; margin-top:4px; font-size:14px;">Pass to Other Inspector</button>'+
+                    passButton+
                     '</div>'+
                     '</div>';
             }

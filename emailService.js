@@ -5,6 +5,7 @@ const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KE
 const fromEmail = process.env.FROM_EMAIL || "FoodLink <notifications@apexinterview.in>";
 
 const DEFAULT_APP_URL = "https://foodlink-version-03.vercel.app";
+const DEFAULT_ADMIN_EMAIL = "26mx128@psgtech.ac.in";
 
 const appUrl = (
     process.env.APP_URL ||
@@ -43,6 +44,9 @@ async function sendMail({ to, subject, html }) {
 
 // ─── Shared Layout ─────────────────────────────────────────────────────────────
 function layout({ headerColor = "#1a7a3c", headerLabel, title, preheader, body, ctaText, ctaUrl }) {
+    // Only show the button when the link is an absolute http(s) URL, so we never send a dead link
+    const hasCta = ctaText && /^https?:\/\//i.test(ctaUrl || "");
+
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -101,7 +105,7 @@ function layout({ headerColor = "#1a7a3c", headerLabel, title, preheader, body, 
         </tr>
 
         <!-- CTA Button -->
-        ${ctaText && ctaUrl ? `
+        ${hasCta ? `
         <tr>
           <td align="center" style="padding:4px 36px 32px;">
             <table cellpadding="0" cellspacing="0" border="0">
@@ -172,7 +176,10 @@ function pill(text, bg) {
 // NOTIFICATION 1 — Admin: New donation request submitted
 // ═══════════════════════════════════════════════════════════════════════════════
 async function notifyAdminNewDonation(food, adminEmails) {
-    if (!adminEmails || adminEmails.length === 0) return;
+    // Never silently skip: fall back to ADMIN_EMAIL env, then to the default admin address
+    let recipients = Array.isArray(adminEmails) ? adminEmails.filter(Boolean) : [adminEmails].filter(Boolean);
+    if (recipients.length === 0 && process.env.ADMIN_EMAIL) recipients = process.env.ADMIN_EMAIL.split(",").map(e => e.trim()).filter(Boolean);
+    if (recipients.length === 0) recipients = [DEFAULT_ADMIN_EMAIL];
 
     const expires = new Date(food.expires).toLocaleString("en-IN", {
         timeZone: "Asia/Kolkata", day: "2-digit", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit"
@@ -202,7 +209,7 @@ async function notifyAdminNewDonation(food, adminEmails) {
     <p style="margin:18px 0 6px;font-size:13px;color:#6b7280;">Log in to the Admin Dashboard to review this listing and assign either <strong>Agilesh</strong> or <strong>Haresh</strong> for field inspection.</p>`;
 
     return await sendMail({
-        to: adminEmails,
+        to: recipients,
         subject: `Action Required: New Food Donation — ${food.name}, ${food.servings} servings at ${food.address}`,
         html: layout({
             headerColor: "#1a7a3c",
